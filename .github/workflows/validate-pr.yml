@@ -1,0 +1,160 @@
+name: Validate Package PR
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['pool/**/*.deb']
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout PR branch with LFS
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          lfs: true
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changes
+        run: |
+          git diff --name-only --diff-filter=A ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} \
+            | grep '\.deb$' > added_debs.txt || true
+          git diff --name-only --diff-filter=D ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} \
+            | grep '\.deb$' > deleted_debs.txt || true
+          echo "added=$(wc -l < added_debs.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "deleted=$(wc -l < deleted_debs.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Validate added packages
+        if: steps.changes.outputs.added != '0'
+        id: validate-added
+        run: |
+          ERRORS=""
+          while IFS= read -r deb; do
+            echo "=== Validating: $deb ==="
+
+            # 1. Path must be under pool/main/
+            if [[ "$deb" != pool/main/* ]]; then
+              ERRORS="${ERRORS}❌ \`$deb\` is outside pool/main/\n"
+              continue
+            fi
+
+            # 2. Directory name must match Package field
+            DIR_PKG=$(echo "$deb" | cut -d/ -f3)
+            CTRL_PKG=$(dpkg-deb -f "$deb" Package)
+            if [[ "$DIR_PKG" != "$CTRL_PKG" ]]; then
+              ERRORS="${ERRORS}❌ Directory name '$DIR_PKG' != Package field '$CTRL_PKG'\n"
+            fi
+
+            # 3. Must contain .desktop file
+            if ! dpkg-deb -c "$deb" | grep -q '\.desktop$'; then
+              ERRORS="${ERRORS}❌ \`$deb\` has no .desktop file. All apps must include one.\n"
+            fi
+
+            # 4. Valid package name
+            if ! echo "$CTRL_PKG" | grep -qP '^[a-z0-9][a-z0-9.+\-]+$'; then
+              ERRORS="${ERRORS}❌ Invalid package name: '$CTRL_PKG'\n"
+            fi
+
+            # 5. Maintainer email vs PR author
+            MAINTAINER=$(dpkg-deb -f "$deb" Maintainer)
+            MAINT_EMAIL=$(echo "$MAINTAINER" | grep -oP '<\K[^>]+' || echo "$MAINTAINER")
+            PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+            NOREPLY="${PR_AUTHOR}@users.noreply.github.com"
+
+            AUTHOR_EMAIL=$(gh api "users/$PR_AUTHOR" --jq '.email // empty' 2>/dev/null || true)
+
+            if [[ "$MAINT_EMAIL" != "$NOREPLY" ]] && [[ "$MAINT_EMAIL" != "$AUTHOR_EMAIL" ]]; then
+              ERRORS="${ERRORS}❌ Maintainer email '${MAINT_EMAIL}' does not match PR author '${PR_AUTHOR}' (expected ${NOREPLY} or ${AUTHOR_EMAIL})\n"
+            fi
+
+            # 6. Version must be newer than existing
+            EXISTING_PKG=$(find pool/main/"$DIR_PKG"/ -name "${CTRL_PKG}_*_*.deb" 2>/dev/null | grep -v "$deb" | sort -V | tail -1 || true)
+            if [[ -n "$EXISTING_PKG" ]]; then
+              EXISTING_VER=$(dpkg-deb -f "$EXISTING_PKG" Version)
+              NEW_VER=$(dpkg-deb -f "$deb" Version)
+              if dpkg --compare-versions "$NEW_VER" le "$EXISTING_VER" 2>/dev/null; then
+                ERRORS="${ERRORS}❌ Version $NEW_VER is not newer than existing $EXISTING_VER\n"
+              fi
+            fi
+
+            if [[ -z "$ERRORS" ]]; then
+              echo "✓ $deb passed all checks"
+            fi
+          done < added_debs.txt
+
+          if [[ -n "$ERRORS" ]]; then
+            echo "VALIDATION_ERRORS<<EOF" >> "$GITHUB_ENV"
+            echo -e "$ERRORS" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+            echo -e "$ERRORS"
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate deleted packages (ownership check)
+        if: steps.changes.outputs.deleted != '0'
+        id: validate-deleted
+        run: |
+          ERRORS=""
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          NOREPLY="${PR_AUTHOR}@users.noreply.github.com"
+          AUTHOR_EMAIL=$(gh api "users/$PR_AUTHOR" --jq '.email // empty' 2>/dev/null || true)
+
+          # Checkout base to inspect deleted files
+          git checkout ${{ github.event.pull_request.base.sha }} -- $(cat deleted_debs.txt) 2>/dev/null || true
+
+          while IFS= read -r deb; do
+            if [[ ! -f "$deb" ]]; then
+              continue
+            fi
+            MAINTAINER=$(dpkg-deb -f "$deb" Maintainer)
+            MAINT_EMAIL=$(echo "$MAINTAINER" | grep -oP '<\K[^>]+' || echo "$MAINTAINER")
+
+            if [[ "$MAINT_EMAIL" != "$NOREPLY" ]] && [[ "$MAINT_EMAIL" != "$AUTHOR_EMAIL" ]]; then
+              ERRORS="${ERRORS}❌ Cannot delete \`$deb\`: maintainer '${MAINT_EMAIL}' does not match PR author '${PR_AUTHOR}'\n"
+            fi
+          done < deleted_debs.txt
+
+          if [[ -n "$ERRORS" ]]; then
+            echo "VALIDATION_ERRORS<<EOF" >> "$GITHUB_ENV"
+            echo -e "$ERRORS" >> "$GITHUB_ENV"
+            echo "EOF" >> "$GITHUB_ENV"
+            echo -e "$ERRORS"
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Comment on PR with validation errors
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const errors = process.env.VALIDATION_ERRORS || 'Unknown validation failure';
+            const body = `## ❌ Package Validation Failed\n\n${errors}\n\n---\n*If you believe this is an error, contact a maintainer.*`;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Comment on PR with success
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `## ✅ Package Validation Passed\n\nAll checks passed. Ready for maintainer review.`;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });

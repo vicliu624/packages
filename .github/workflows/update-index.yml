@@ -1,0 +1,87 @@
+name: Deploy APT Repository to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pool/**/*.deb'
+      - '.github/workflows/update-index.yml'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout with LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+
+      - name: Build APT repository
+        run: |
+          mkdir -p public/pool public/dists/stable/main/binary-arm64
+
+          # Copy all deb files preserving pool structure
+          cp -r pool/ public/pool/
+
+          # Generate Packages index
+          cd public
+          dpkg-scanpackages --multiversion pool/ > dists/stable/main/binary-arm64/Packages
+          gzip -k -f dists/stable/main/binary-arm64/Packages
+
+          # Generate Release file
+          cd dists/stable
+          cat > Release <<'EOF'
+          Origin: CardputerZero
+          Label: CardputerZero AppStore
+          Suite: stable
+          Codename: stable
+          Architectures: arm64
+          Components: main
+          Description: CardputerZero APT Repository
+          EOF
+          sed -i 's/^          //' Release
+
+          {
+            echo "MD5Sum:"
+            for f in main/binary-arm64/Packages main/binary-arm64/Packages.gz; do
+              size=$(wc -c < "$f" | tr -d ' ')
+              hash=$(md5sum "$f" | awk '{print $1}')
+              printf " %s %s %s\n" "$hash" "$size" "$f"
+            done
+            echo "SHA256:"
+            for f in main/binary-arm64/Packages main/binary-arm64/Packages.gz; do
+              size=$(wc -c < "$f" | tr -d ' ')
+              hash=$(sha256sum "$f" | awk '{print $1}')
+              printf " %s %s %s\n" "$hash" "$size" "$f"
+            done
+          } >> Release
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

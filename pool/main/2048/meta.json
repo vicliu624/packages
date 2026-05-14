@@ -1,0 +1,21 @@
+{
+  "title": "2048",
+  "summary": "Classic 2048 puzzle game tuned for the Cardputer Zero keyboard.",
+  "categories": [
+    "Games",
+    "Puzzle"
+  ],
+  "license": "MIT",
+  "source_repo": "https://github.com/CardputerZero/2048",
+  "icon": "share/images/2048.png",
+  "screenshots": [
+    "store/screenshots/2048-start-320x170.png",
+    "store/screenshots/2048-midgame-320x170.png",
+    "store/screenshots/2048-win-320x170.png",
+    "store/screenshots/2048-gameover-320x170.png"
+  ],
+  "permissions": {
+    "audio": true,
+    "keyboard_input": true
+  }
+}

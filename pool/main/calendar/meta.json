@@ -1,6 +1,6 @@
 {
   "title": "Calendar",
-  "summary": "Compact Calendar app for local and online ICS schedules.",
+  "summary": "Compact calendar with ICS sync, lunar dates, regional holidays, and almanac.",
   "categories": [
     "Productivity",
     "Calendar"
@@ -9,6 +9,9 @@
   "source_repo": "https://github.com/CardputerZero/Calendar",
   "icon": "share/images/calendar.png",
   "screenshots": [
+    "store/screenshots/calendar-month-zh-320x170.png",
+    "store/screenshots/calendar-subscriptions-zh-320x170.png",
+    "store/screenshots/calendar-source-edit-zh-320x170.png",
     "store/screenshots/calendar-manager-zh-320x170.png"
   ],
   "permissions": {
